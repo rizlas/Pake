@@ -22,7 +22,7 @@ import * as psl from 'psl';
 import { InvalidArgumentError, program as program$1, Option } from 'commander';
 
 var name = "pake-cli";
-var version = "3.8.2";
+var version = "3.11.2";
 var description = "🤱🏻 Turn any webpage into a desktop app with one command. 🤱🏻 一键打包网页生成轻量桌面应用。";
 var engines = {
 	node: ">=18.0.0"
@@ -71,16 +71,16 @@ var type = "module";
 var exports$1 = "./dist/cli.js";
 var license = "MIT";
 var dependencies = {
-	"@tauri-apps/api": "^2.9.1",
-	"@tauri-apps/cli": "^2.9.6",
+	"@tauri-apps/api": "~2.10.1",
+	"@tauri-apps/cli": "^2.10.0",
 	chalk: "^5.6.2",
-	commander: "^14.0.2",
+	commander: "^14.0.3",
 	execa: "^9.6.1",
 	"file-type": "^21.3.0",
 	"fs-extra": "^11.3.3",
 	"icon-gen": "^5.0.0",
 	loglevel: "^1.9.2",
-	ora: "^9.0.0",
+	ora: "^9.3.0",
 	prompts: "^2.4.2",
 	psl: "^1.15.0",
 	sharp: "^0.34.5",
@@ -94,19 +94,19 @@ var devDependencies = {
 	"@rollup/plugin-replace": "^6.0.3",
 	"@rollup/plugin-terser": "^0.4.4",
 	"@types/fs-extra": "^11.0.4",
-	"@types/node": "^25.0.9",
+	"@types/node": "^25.3.2",
 	"@types/page-icon": "^0.3.6",
 	"@types/prompts": "^2.4.9",
 	"@types/tmp": "^0.2.6",
 	"@types/update-notifier": "^6.0.8",
 	"app-root-path": "^3.1.0",
 	"cross-env": "^10.1.0",
-	prettier: "^3.8.0",
-	rollup: "^4.55.2",
+	prettier: "^3.8.1",
+	rollup: "^4.59.0",
 	"rollup-plugin-typescript2": "^0.36.0",
 	tslib: "^2.8.1",
 	typescript: "^5.9.3",
-	vitest: "^4.0.17"
+	vitest: "^4.0.18"
 };
 var pnpm = {
 	overrides: {
@@ -171,14 +171,29 @@ let tauriConfig = {
     pake: pakeConf,
 };
 
-// Generates an identifier based on the given URL.
-function getIdentifier(url) {
+// Generates a stable identifier based on the app URL (and optionally name).
+// When name is provided it is included in the hash so two apps wrapping
+// the same URL can coexist. Omitting name preserves backward compatibility
+// with identifiers generated before V3.10.1.
+function getIdentifier(url, name) {
+    const hashInput = name ? `${url}::${name}` : url;
     const postFixHash = crypto
         .createHash('md5')
-        .update(url)
+        .update(hashInput)
         .digest('hex')
         .substring(0, 6);
-    return `com.pake.${postFixHash}`;
+    return `com.pake.a${postFixHash}`;
+}
+function resolveIdentifier(url, explicitName, customIdentifier) {
+    const trimmedIdentifier = customIdentifier?.trim();
+    if (trimmedIdentifier) {
+        if (!/^[a-zA-Z][a-zA-Z0-9.-]*[a-zA-Z0-9]$/.test(trimmedIdentifier)) {
+            throw new Error(`Invalid identifier "${trimmedIdentifier}". Must start with a letter, ` +
+                `contain only letters, digits, hyphens, and dots, and end with a letter or digit.`);
+        }
+        return trimmedIdentifier;
+    }
+    return getIdentifier(url, explicitName);
 }
 async function promptText(message, initial) {
     const response = await prompts({
@@ -484,7 +499,7 @@ async function mergeConfig(url, options, tauriConf) {
             await fsExtra.copy(sourcePath, destPath);
         }
     }));
-    const { width, height, fullscreen, maximize, hideTitleBar, alwaysOnTop, appVersion, darkMode, disabledWebShortcuts, activationShortcut, userAgent, showSystemTray, systemTrayIcon, useLocalFile, identifier, name = 'pake-app', resizable = true, inject, proxyUrl, installerLanguage, hideOnClose, incognito, title, wasm, enableDragDrop, multiInstance, startToTray, forceInternalNavigation, zoom, minWidth, minHeight, ignoreCertificateErrors, newWindow, } = options;
+    const { width, height, fullscreen, maximize, hideTitleBar, alwaysOnTop, appVersion, darkMode, disabledWebShortcuts, activationShortcut, userAgent, showSystemTray, systemTrayIcon, useLocalFile, identifier, name = 'pake-app', resizable = true, inject, proxyUrl, installerLanguage, hideOnClose, incognito, title, wasm, enableDragDrop, multiInstance, multiWindow, startToTray, forceInternalNavigation, internalUrlRegex, zoom, minWidth, minHeight, ignoreCertificateErrors, newWindow, camera, microphone, } = options;
     const { platform } = process;
     const platformHideOnClose = hideOnClose ?? platform === 'darwin';
     const tauriConfWindowOptions = {
@@ -505,6 +520,7 @@ async function mergeConfig(url, options, tauriConf) {
         enable_drag_drop: enableDragDrop,
         start_to_tray: startToTray && showSystemTray,
         force_internal_navigation: forceInternalNavigation,
+        internal_url_regex: internalUrlRegex,
         zoom,
         min_width: minWidth,
         min_height: minHeight,
@@ -666,7 +682,15 @@ Terminal=false
             // Avoid copying if source and destination are the same
             const absoluteDestPath = path.resolve(iconPath);
             if (resolvedIconPath !== absoluteDestPath) {
-                await fsExtra.copy(resolvedIconPath, iconPath);
+                try {
+                    await fsExtra.copy(resolvedIconPath, iconPath);
+                }
+                catch (error) {
+                    if (!(error instanceof Error &&
+                        error.message.includes('Source and destination must not be the same'))) {
+                        throw error;
+                    }
+                }
             }
         }
         if (updateIconPath) {
@@ -728,6 +752,7 @@ Terminal=false
     }
     tauriConf.pake.proxy_url = proxyUrl || '';
     tauriConf.pake.multi_instance = multiInstance;
+    tauriConf.pake.multi_window = multiWindow;
     // Configure WASM support with required HTTP headers
     if (wasm) {
         tauriConf.app.security = {
@@ -736,6 +761,26 @@ Terminal=false
                 'Cross-Origin-Embedder-Policy': 'require-corp',
             },
         };
+    }
+    // Write entitlements dynamically on macOS so camera/microphone are opt-in
+    if (platform === 'darwin') {
+        const entitlementEntries = [];
+        if (camera) {
+            entitlementEntries.push('    <key>com.apple.security.device.camera</key>\n    <true/>');
+        }
+        if (microphone) {
+            entitlementEntries.push('    <key>com.apple.security.device.audio-input</key>\n    <true/>');
+        }
+        const entitlementsContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+${entitlementEntries.join('\n')}
+  </dict>
+</plist>
+`;
+        const entitlementsPath = path.join(npmDirectory, 'src-tauri', 'entitlements.plist');
+        await fsExtra.writeFile(entitlementsPath, entitlementsContent);
     }
     // Save config file.
     const platformConfigPaths = {
@@ -759,13 +804,20 @@ class BaseBuilder {
         this.options = options;
     }
     getBuildEnvironment() {
-        return IS_MAC
-            ? {
-                CFLAGS: '-fno-modules',
-                CXXFLAGS: '-fno-modules',
-                MACOSX_DEPLOYMENT_TARGET: '14.0',
-            }
-            : undefined;
+        if (!IS_MAC) {
+            return undefined;
+        }
+        const currentPath = process.env.PATH || '';
+        const systemToolsPath = '/usr/bin';
+        const buildPath = currentPath.startsWith(`${systemToolsPath}:`)
+            ? currentPath
+            : `${systemToolsPath}:${currentPath}`;
+        return {
+            CFLAGS: '-fno-modules',
+            CXXFLAGS: '-fno-modules',
+            MACOSX_DEPLOYMENT_TARGET: '14.0',
+            PATH: buildPath,
+        };
     }
     getInstallTimeout() {
         // Windows needs more time due to native compilation and antivirus scanning
@@ -795,6 +847,21 @@ class BaseBuilder {
             catch {
                 throw new Error('Neither pnpm nor npm is available. Please install a package manager.');
             }
+        }
+    }
+    async copyFileWithSamePathGuard(sourcePath, destinationPath) {
+        if (path.resolve(sourcePath) === path.resolve(destinationPath)) {
+            return;
+        }
+        try {
+            await fsExtra.copy(sourcePath, destinationPath, { overwrite: true });
+        }
+        catch (error) {
+            if (error instanceof Error &&
+                error.message.includes('Source and destination must not be the same')) {
+                return;
+            }
+            throw error;
         }
     }
     async prepare() {
@@ -842,7 +909,7 @@ class BaseBuilder {
             if (isChina) {
                 logger.info(`✺ Located in China, using ${packageManager}/rsProxy CN mirror.`);
                 const projectCnConf = path.join(tauriSrcPath, 'rust_proxy.toml');
-                await fsExtra.copy(projectCnConf, projectConf);
+                await this.copyFileWithSamePathGuard(projectCnConf, projectConf);
                 await shellExec(`cd "${npmDirectory}" && ${packageManager} install${registryOption}${peerDepsOption}`, timeout, { ...buildEnv, CI: 'true' });
             }
             else {
@@ -861,7 +928,7 @@ class BaseBuilder {
                 usedMirror = true;
                 try {
                     const projectCnConf = path.join(tauriSrcPath, 'rust_proxy.toml');
-                    await fsExtra.copy(projectCnConf, projectConf);
+                    await this.copyFileWithSamePathGuard(projectCnConf, projectConf);
                     await shellExec(`cd "${npmDirectory}" && ${packageManager} install${registryOption}${peerDepsOption}`, timeout, { ...buildEnv, CI: 'true' });
                     retrySpinner.succeed(chalk.green('Package installed with CN mirror!'));
                 }
@@ -960,6 +1027,27 @@ class BaseBuilder {
             const binaryPath = this.getRawBinaryPath(name);
             logger.success('✔ Raw binary located in', path.resolve(binaryPath));
         }
+        if (IS_MAC && fileType === 'app' && this.options.install) {
+            await this.installAppToApplications(distPath, name);
+        }
+    }
+    async installAppToApplications(appBundlePath, appName) {
+        try {
+            logger.info(`- Installing ${appName} to /Applications...`);
+            const appBundleName = path.basename(appBundlePath);
+            const appDest = path.join('/Applications', appBundleName);
+            if (await fsExtra.pathExists(appDest)) {
+                logger.warn(`  Existing ${appBundleName} in /Applications will be replaced.`);
+            }
+            // fsExtra.move uses fs.rename (atomic on same filesystem) and falls back
+            // to copy+remove only when moving across volumes.
+            await fsExtra.move(appBundlePath, appDest, { overwrite: true });
+            logger.success(`✔ ${appBundleName.replace(/\.app$/, '')} installed to /Applications`);
+        }
+        catch (error) {
+            logger.error(`✕ Failed to install ${appName}: ${error}`);
+            logger.info(`  App bundle still available at: ${appBundlePath}`);
+        }
     }
     getFileType(target) {
         return target;
@@ -976,33 +1064,21 @@ class BaseBuilder {
             message.includes('appimage tool failed') ||
             message.includes('strip tool'));
     }
-    /**
-     * 解析目标架构
-     */
     resolveTargetArch(requestedArch) {
         if (requestedArch === 'auto' || !requestedArch) {
             return process.arch;
         }
         return requestedArch;
     }
-    /**
-     * 获取Tauri构建目标
-     */
     getTauriTarget(arch, platform = process.platform) {
         const platformMappings = BaseBuilder.ARCH_MAPPINGS[platform];
         if (!platformMappings)
             return null;
         return platformMappings[arch] || null;
     }
-    /**
-     * 获取架构显示名称（用于文件名）
-     */
     getArchDisplayName(arch) {
         return BaseBuilder.ARCH_DISPLAY_NAMES[arch] || arch;
     }
-    /**
-     * 构建基础构建命令
-     */
     buildBaseCommand(packageManager, configPath, target) {
         const baseCommand = this.options.debug
             ? `${packageManager} run build:debug`
@@ -1019,9 +1095,6 @@ class BaseBuilder {
         }
         return fullCommand;
     }
-    /**
-     * 获取构建特性列表
-     */
     getBuildFeatures() {
         const features = ['cli-build'];
         // Add macos-proxy feature for modern macOS (Darwin 23+ = macOS 14+)
@@ -1130,7 +1203,6 @@ class BaseBuilder {
     }
 }
 BaseBuilder.packageManagerCache = null;
-// 架构映射配置
 BaseBuilder.ARCH_MAPPINGS = {
     darwin: {
         arm64: 'aarch64-apple-darwin',
@@ -1146,7 +1218,6 @@ BaseBuilder.ARCH_MAPPINGS = {
         x64: 'x86_64-unknown-linux-gnu',
     },
 };
-// 架构名称映射（用于文件名生成）
 BaseBuilder.ARCH_DISPLAY_NAMES = {
     arm64: 'aarch64',
     x64: 'x64',
@@ -1160,7 +1231,9 @@ class MacBuilder extends BaseBuilder {
         this.buildArch = validArchs.includes(options.targets || '')
             ? options.targets
             : 'auto';
-        if (options.iterativeBuild || process.env.PAKE_CREATE_APP === '1') {
+        if (options.iterativeBuild ||
+            options.install ||
+            process.env.PAKE_CREATE_APP === '1') {
             this.buildFormat = 'app';
         }
         else {
@@ -1397,6 +1470,108 @@ class BuilderProvider {
     }
 }
 
+const ICO_HEADER_SIZE = 6;
+const ICO_DIR_ENTRY_SIZE = 16;
+const ICO_TYPE_ICON = 1;
+function decodeDimension(value) {
+    return value === 0 ? 256 : value;
+}
+function compareByPreferredSize(preferredSize) {
+    return (a, b) => {
+        const aSize = Math.max(a.width, a.height);
+        const bSize = Math.max(b.width, b.height);
+        const aExact = aSize === preferredSize ? 0 : 1;
+        const bExact = bSize === preferredSize ? 0 : 1;
+        if (aExact !== bExact)
+            return aExact - bExact;
+        const aDistance = Math.abs(aSize - preferredSize);
+        const bDistance = Math.abs(bSize - preferredSize);
+        if (aDistance !== bDistance)
+            return aDistance - bDistance;
+        const aSmaller = aSize < preferredSize ? 1 : 0;
+        const bSmaller = bSize < preferredSize ? 1 : 0;
+        if (aSmaller !== bSmaller)
+            return aSmaller - bSmaller;
+        if (a.bitCount !== b.bitCount)
+            return b.bitCount - a.bitCount;
+        if (aSize !== bSize)
+            return bSize - aSize;
+        return a.index - b.index;
+    };
+}
+function parseIcoBuffer(buffer) {
+    if (buffer.length < ICO_HEADER_SIZE) {
+        throw new Error('Invalid ICO: header too short.');
+    }
+    const reserved = buffer.readUInt16LE(0);
+    const type = buffer.readUInt16LE(2);
+    const count = buffer.readUInt16LE(4);
+    if (reserved !== 0 || type !== ICO_TYPE_ICON || count < 1) {
+        throw new Error('Invalid ICO: invalid header.');
+    }
+    const tableSize = ICO_HEADER_SIZE + count * ICO_DIR_ENTRY_SIZE;
+    if (buffer.length < tableSize) {
+        throw new Error('Invalid ICO: directory table too short.');
+    }
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+        const offset = ICO_HEADER_SIZE + i * ICO_DIR_ENTRY_SIZE;
+        const widthByte = buffer.readUInt8(offset);
+        const heightByte = buffer.readUInt8(offset + 1);
+        const bitCount = buffer.readUInt16LE(offset + 6);
+        const bytesInRes = buffer.readUInt32LE(offset + 8);
+        const imageOffset = buffer.readUInt32LE(offset + 12);
+        if (bytesInRes < 1 || imageOffset + bytesInRes > buffer.length) {
+            throw new Error('Invalid ICO: frame out of bounds.');
+        }
+        entries.push({
+            index: i,
+            width: decodeDimension(widthByte),
+            height: decodeDimension(heightByte),
+            bitCount,
+            bytesInRes,
+            imageOffset,
+            directory: buffer.subarray(offset, offset + ICO_DIR_ENTRY_SIZE),
+            data: buffer.subarray(imageOffset, imageOffset + bytesInRes),
+        });
+    }
+    return entries;
+}
+function buildReorderedIcoBuffer(buffer, preferredSize) {
+    const entries = parseIcoBuffer(buffer);
+    const ordered = [...entries].sort(compareByPreferredSize(preferredSize));
+    const count = ordered.length;
+    const tableSize = ICO_HEADER_SIZE + count * ICO_DIR_ENTRY_SIZE;
+    const payloadSize = ordered.reduce((acc, entry) => acc + entry.data.length, 0);
+    const output = Buffer.alloc(tableSize + payloadSize);
+    output.writeUInt16LE(0, 0);
+    output.writeUInt16LE(ICO_TYPE_ICON, 2);
+    output.writeUInt16LE(count, 4);
+    let currentOffset = tableSize;
+    for (let i = 0; i < count; i++) {
+        const entry = ordered[i];
+        const entryOffset = ICO_HEADER_SIZE + i * ICO_DIR_ENTRY_SIZE;
+        entry.directory.copy(output, entryOffset, 0, 8);
+        output.writeUInt32LE(entry.data.length, entryOffset + 8);
+        output.writeUInt32LE(currentOffset, entryOffset + 12);
+        entry.data.copy(output, currentOffset);
+        currentOffset += entry.data.length;
+    }
+    return output;
+}
+async function writeIcoWithPreferredSize(sourcePath, outputPath, preferredSize) {
+    try {
+        const sourceBuffer = await fsExtra.readFile(sourcePath);
+        const reordered = buildReorderedIcoBuffer(sourceBuffer, preferredSize);
+        await fsExtra.ensureDir(path.dirname(outputPath));
+        await fsExtra.outputFile(outputPath, reordered);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+
 const ICON_CONFIG = {
     minFileSize: 100,
     supportedFormats: ['png', 'ico', 'jpeg', 'jpg', 'webp', 'icns'],
@@ -1440,7 +1615,11 @@ async function copyWindowsIconIfNeeded(convertedPath, appName) {
     try {
         const finalIconPath = generateIconPath(appName);
         await fsExtra.ensureDir(path.dirname(finalIconPath));
-        await fsExtra.copy(convertedPath, finalIconPath);
+        // Reorder ICO to prioritize 256px icons for better Windows display
+        const reordered = await writeIcoWithPreferredSize(convertedPath, finalIconPath, 256);
+        if (!reordered) {
+            await fsExtra.copy(convertedPath, finalIconPath);
+        }
         return finalIconPath;
     }
     catch (error) {
@@ -1697,17 +1876,34 @@ function generateIconServiceUrls(domain) {
     ];
 }
 /**
+ * Generates dashboard-icons URLs for an app name.
+ * Uses walkxcode/dashboard-icons as a final fallback for selfhosted apps.
+ * Keeps matching conservative to avoid overriding valid site-specific icons.
+ */
+function generateDashboardIconUrls(appName) {
+    const baseUrl = 'https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png';
+    const name = appName.toLowerCase().trim();
+    const slugs = new Set();
+    // Exact name
+    slugs.add(name);
+    // Replace spaces with hyphens
+    slugs.add(name.replace(/\s+/g, '-'));
+    return [...slugs]
+        .filter((s) => s.length > 0)
+        .map((slug) => `${baseUrl}/${slug}.png`);
+}
+/**
  * Attempts to fetch favicon from website
  */
 async function tryGetFavicon(url, appName) {
     try {
         const domain = new URL(url).hostname;
         const spinner = getSpinner(`Fetching icon from ${domain}...`);
-        const serviceUrls = generateIconServiceUrls(domain);
         const isCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
         const downloadTimeout = isCI
             ? ICON_CONFIG.downloadTimeout.ci
             : ICON_CONFIG.downloadTimeout.default;
+        const serviceUrls = generateIconServiceUrls(domain);
         for (const serviceUrl of serviceUrls) {
             try {
                 const faviconPath = await downloadIcon(serviceUrl, false, downloadTimeout);
@@ -1725,6 +1921,30 @@ async function tryGetFavicon(url, appName) {
                     logger.debug(`Icon service ${serviceUrl} failed: ${error.message}`);
                 }
                 continue;
+            }
+        }
+        // Final fallback for selfhosted apps behind auth where domain-based
+        // services cannot access the site favicon.
+        if (appName) {
+            const dashboardIconUrls = generateDashboardIconUrls(appName);
+            for (const iconUrl of dashboardIconUrls) {
+                try {
+                    const iconPath = await downloadIcon(iconUrl, false, downloadTimeout);
+                    if (!iconPath)
+                        continue;
+                    const convertedPath = await convertIconFormat(iconPath, appName);
+                    if (convertedPath) {
+                        const finalPath = await copyWindowsIconIfNeeded(convertedPath, appName);
+                        spinner.succeed(chalk.green(`Icon found via dashboard-icons fallback for "${appName}"!`));
+                        return finalPath;
+                    }
+                }
+                catch (error) {
+                    if (error instanceof Error) {
+                        logger.debug(`Dashboard icon ${iconUrl} failed: ${error.message}`);
+                    }
+                    continue;
+                }
             }
         }
         spinner.warn(`No favicon found for ${domain}. Using default.`);
@@ -1884,10 +2104,11 @@ async function handleOptions(options, url) {
             process.exit(1);
         }
     }
+    const resolvedName = name || 'pake-app';
     const appOptions = {
         ...options,
-        name,
-        identifier: getIdentifier(url),
+        name: resolvedName,
+        identifier: resolveIdentifier(url, options.name, options.identifier),
     };
     const iconPath = await handleIcon(appOptions, url);
     appOptions.icon = iconPath || '';
@@ -1933,14 +2154,19 @@ const DEFAULT_PAKE_OPTIONS = {
     enableDragDrop: false,
     keepBinary: false,
     multiInstance: false,
+    multiWindow: false,
     startToTray: false,
     forceInternalNavigation: false,
+    internalUrlRegex: '',
     iterativeBuild: false,
     zoom: 100,
     minWidth: 0,
     minHeight: 0,
     ignoreCertificateErrors: false,
     newWindow: false,
+    install: false,
+    camera: false,
+    microphone: false,
 };
 
 function validateNumberInput(value) {
@@ -1980,6 +2206,7 @@ ${green('|_|   \\__,_|_|\\_\\___|  can turn any webpage into a desktop app with 
         .showHelpAfterError()
         .argument('[url]', 'The web URL you want to package', validateUrlInput)
         .option('--name <string>', 'Application name')
+        .addOption(new Option('--identifier <string>', 'Application identifier / bundle ID').hideHelp())
         .option('--icon <string>', 'Application icon', DEFAULT_PAKE_OPTIONS.icon)
         .option('--width <number>', 'Window width', validateNumberInput, DEFAULT_PAKE_OPTIONS.width)
         .option('--height <number>', 'Window height', validateNumberInput, DEFAULT_PAKE_OPTIONS.height)
@@ -2058,11 +2285,17 @@ ${green('|_|   \\__,_|_|\\_\\___|  can turn any webpage into a desktop app with 
         .addOption(new Option('--multi-instance', 'Allow multiple app instances')
         .default(DEFAULT_PAKE_OPTIONS.multiInstance)
         .hideHelp())
+        .addOption(new Option('--multi-window', 'Allow opening multiple windows within one app instance')
+        .default(DEFAULT_PAKE_OPTIONS.multiWindow)
+        .hideHelp())
         .addOption(new Option('--start-to-tray', 'Start app minimized to tray')
         .default(DEFAULT_PAKE_OPTIONS.startToTray)
         .hideHelp())
         .addOption(new Option('--force-internal-navigation', 'Keep every link inside the Pake window instead of opening external handlers')
         .default(DEFAULT_PAKE_OPTIONS.forceInternalNavigation)
+        .hideHelp())
+        .addOption(new Option('--internal-url-regex <string>', 'Regex pattern to match URLs that should be considered internal')
+        .default(DEFAULT_PAKE_OPTIONS.internalUrlRegex)
         .hideHelp())
         .addOption(new Option('--installer-language <string>', 'Installer language')
         .default(DEFAULT_PAKE_OPTIONS.installerLanguage)
@@ -2091,8 +2324,15 @@ ${green('|_|   \\__,_|_|\\_\\___|  can turn any webpage into a desktop app with 
         .addOption(new Option('--iterative-build', 'Turn on rapid build mode (app only, no dmg/deb/msi), good for debugging')
         .default(DEFAULT_PAKE_OPTIONS.iterativeBuild)
         .hideHelp())
-        .addOption(new Option('--new-window', 'Allow new window for third-party login')
+        .addOption(new Option('--new-window', 'Allow sites to open new windows (for auth flows, tabs, branches)')
         .default(DEFAULT_PAKE_OPTIONS.newWindow)
+        .hideHelp())
+        .option('--install', 'Auto-install app to /Applications (macOS) after build and remove local bundle', DEFAULT_PAKE_OPTIONS.install)
+        .addOption(new Option('--camera', 'Request camera permission on macOS')
+        .default(DEFAULT_PAKE_OPTIONS.camera)
+        .hideHelp())
+        .addOption(new Option('--microphone', 'Request microphone permission on macOS')
+        .default(DEFAULT_PAKE_OPTIONS.microphone)
         .hideHelp())
         .version(packageJson.version, '-v, --version')
         .configureHelp({
